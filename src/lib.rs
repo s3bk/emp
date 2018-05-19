@@ -1,52 +1,24 @@
 #![feature(generators, generator_trait, get_type_id, const_type_id)]
 
+extern crate bincode;
+extern crate serde;
+
 pub use std::any::{TypeId};
 use std::ops::Generator;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt::{self, Debug};
 use std::mem;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::ops::GeneratorState;
 
-pub trait Message: Debug {}
-impl<T: Debug> Message for T {}
-
-pub struct Envelope {
-    event: Box<Message>,
-    pub type_id: TypeId
-}
-impl Envelope {
-    pub fn pack<T: Message + 'static>(e: T) -> Envelope {
-        Envelope {
-            event: Box::new(e),
-            type_id: TypeId::of::<T>()
-        }
-    }
-    pub fn unpack<T: Message + 'static>(self) -> T {
-        let Envelope { event, type_id } = self;
-        assert_eq!(type_id, TypeId::of::<T>());
-        
-        unsafe {
-            let ptr = Box::into_raw(event);
-            *Box::from_raw(ptr as *mut T)
-        }
-    }
-}
-impl Debug for Envelope {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.event.fmt(f)
-    }
-}
+pub mod message;
+use message::*;
 
 #[derive(Debug, Copy, Clone)]
-pub struct Address(u32);
+pub struct Cid(u32);
 
-pub enum ProcessYield {
-    Send(Address, Envelope),
-    YieldTo(Address, Envelope),
-    Empty
-}
+pub type SpawnFunc = Box<Fn(Cid, Inbox) -> GenBox>;
+
 #[derive(Clone)]
 pub struct Inbox {
     inner: Rc<RefCell<VecDeque<Envelope>>>
@@ -64,15 +36,16 @@ impl Inbox {
         self.inner.borrow_mut().push_back(msg);
     }
 }
+type GenBox = Box<Generator<Yield=ProcessYield, Return=ProcessExit>>;
 struct Process {
-    generator: Box<Generator<Yield=ProcessYield, Return=()>>,
+    generator: GenBox,
     inbox: Inbox,
-    addr: Address
+    addr: Cid
 }
 impl Process {
-    fn new<G>(gen: G, inbox: Inbox, addr: Address) -> Process where G: Generator<Yield=ProcessYield, Return=()> + 'static {
+    fn new(generator: GenBox, inbox: Inbox, addr: Cid) -> Process {
         Process {
-            generator: Box::new(gen) as _,
+            generator,
             inbox,
             addr
         }
@@ -106,12 +79,46 @@ macro_rules! recv {
     })
 }
 
+pub struct ExitReason {
+    code: i32,
+    msg: &'static str
+}
+#[derive(Debug)]
+pub struct Sleep;
+
+pub enum ProcessYield {
+    Empty, /// the coroutine has nothing to do
+    Send(Cid, Envelope),
+    YieldTo(Cid, Envelope),
+    Spawn(SpawnFunc)
+}
+pub enum ProcessExit {
+    Done,
+    Terminate(ExitReason),
+}
+
+#[thread_local] static mut MAX_ID: u32 = 0;
+pub fn bump_id() -> u32 {
+    let id = MAX_ID;
+    MAX_ID += 1;
+    id
+}
+
+pub struct PreparedCoro {
+    cid: Cid,
+    process: Process
+}
+impl PreparedCoro {
+    pub fn cid(&self) -> Cid {
+        self.cid
+    }
+}
 
 pub struct Dispatcher {
     processes: HashMap<u32, Process>,
     ready: HashSet<u32>,
     ready2: Option<HashSet<u32>>,
-    max_id: u32
+    exit: Option<ExitReason>
 }
 impl Dispatcher {
     pub fn new() -> Dispatcher {
@@ -119,31 +126,41 @@ impl Dispatcher {
             processes: HashMap::new(),
             ready: HashSet::new(),
             ready2: Some(HashSet::new()),
-            max_id: 0
+            exit: None
         }
     }
-    pub fn spawn<F, G>(&mut self, func: F) -> Address where
-        F: Fn(Address, Inbox) -> G,
-        G: Generator<Yield=ProcessYield, Return=()> + 'static
+    pub fn spawn<F>(&mut self, func: F) -> Cid where
+        F: Fn(Cid, Inbox) -> GenBox
     {
-        let addr = Address(self.max_id);
-        self.max_id += 1;
-        
+        let coro = Self::prepare_spawn(f);
+        let cid = coro.cid();
+        self.spawn_prepared(coro);
+        cid
+    }
+    pub fn prepare_spawn<F>(f: F) -> PreparedCoro where F: Fn(Cid, Inbox) -> GenBox {
+        let cid = Cid(bump_id());
         let inbox = Inbox::new();
         let process = Process::new(func(addr, inbox.clone()), inbox, addr);
-        self.processes.insert(addr.0, process);
-        addr
+        PreparedCoro { cid, process } 
     }
-    pub fn send(&mut self, addr: Address, msg: Envelope) {
+    fn spawn_prepared(&mut self, p: PreparedCoro) {
+        let PreparedCoro { cid, process } = p;
+        assert!(self.processes.insert(cid.0, process).is_none());
+    }
+    pub fn send(&mut self, addr: Cid, msg: Envelope) {
         println!("send {:?} to {:?}", msg, addr);
         self.processes.get_mut(&addr.0).unwrap().queue(msg);
         self.ready.insert(addr.0);
     }
-    fn resume(&mut self, id: u32) -> GeneratorState<ProcessYield, ()> {
+    fn resume(&mut self, id: u32) -> GeneratorState<ProcessYield, ProcessExit> {
         let process = self.processes.get_mut(&id).unwrap();
         unsafe {
             process.generator.resume()
         }
+    }
+    fn yield_to(&mut self, mut addr: Cid, msg: Envelope) {
+        self.send(addr, msg);
+        self.run_one(addr.0);
     }
     fn run_one(&mut self, mut proc_id: u32) {
         use std::ops::GeneratorState::*;
@@ -159,12 +176,14 @@ impl Dispatcher {
                     proc_id = addr.0;
                     println!("yield to {:?}", addr);
                 }
+                Yielded(ProcessYield::Spawn(f)) => 
                 Yielded(ProcessYield::Empty) => break,
-                Complete(_) => {
+                Complete(ProcessExit::Terminate(reason)) => self.exit = Some(reason),
+                Complete(ProcessExit::Done) => {
                     println!("{} terminated", proc_id);
                     self.processes.remove(&proc_id);
                     break;
-                }
+                },
             }
         }
     }
@@ -182,9 +201,20 @@ impl Dispatcher {
         self.ready2 = Some(ready);
     }
     
-    pub fn run(&mut self) {
-        while self.ready.len() > 0 {
-            self.run_once();
+    pub fn run(&mut self) -> ExitReason {
+        loop {
+            // we have CPU work left
+            while self.ready.len() > 0 {
+                self.run_once();
+            }
+            
+            // a chance to exit here
+            if let Some(reason) = self.exit.take() {
+                return reason;
+            }
+            
+            // no CPU work left and not exiting, so we have to wait
+            self.yield_to(Cid(0), Envelope::pack(Sleep));
         }
     }
 }
