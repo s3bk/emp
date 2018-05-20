@@ -1,4 +1,4 @@
-#![feature(generators, generator_trait, get_type_id, const_type_id)]
+#![feature(generators, generator_trait, get_type_id, const_type_id, thread_local)]
 
 extern crate bincode;
 extern crate serde;
@@ -11,8 +11,9 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::ops::GeneratorState;
 
+pub mod macros;
 pub mod message;
-use message::*;
+pub use message::*;
 
 #[derive(Debug, Copy, Clone)]
 pub struct Cid(u32);
@@ -39,15 +40,13 @@ impl Inbox {
 type GenBox = Box<Generator<Yield=ProcessYield, Return=ProcessExit>>;
 struct Process {
     generator: GenBox,
-    inbox: Inbox,
-    addr: Cid
+    inbox: Inbox
 }
 impl Process {
-    fn new(generator: GenBox, inbox: Inbox, addr: Cid) -> Process {
+    fn new(generator: GenBox, inbox: Inbox) -> Process {
         Process {
             generator,
-            inbox,
-            addr
+            inbox
         }
     }
     fn queue(&mut self, msg: Envelope) {
@@ -55,33 +54,9 @@ impl Process {
     }
 }
 
-#[macro_export]
-macro_rules! send {
-    ($addr:expr, $msg:expr) => (yield ProcessYield::Send($addr, Envelope::pack($msg)));  
-    ($msg:expr => $addr:expr) => (yield ProcessYield::Send($addr, Envelope::pack($msg)));
-}
-#[macro_export]
-macro_rules! yield_to {
-    ($addr:expr, $msg:expr) => (yield ProcessYield::YieldTo($addr, Envelope::pack($msg)));  
-    ($msg:expr => $addr:expr) => (yield ProcessYield::YieldTo($addr, Envelope::pack($msg)));
-}
-#[macro_export]
-macro_rules! recv {
-    ( $e:expr => {$( $t:ty, $s:pat => $b:expr ),*  } ) => ({
-        let e: Envelope = $e;
-        match e.type_id {
-            $( id if id == TypeId::of::<$t>() => {
-                let $s: $t = e.unpack();
-                $b
-            } )*,
-            _ => {}
-        }
-    })
-}
-
 pub struct ExitReason {
-    code: i32,
-    msg: &'static str
+    pub code: i32,
+    pub msg: &'static str
 }
 #[derive(Debug)]
 pub struct Sleep;
@@ -90,7 +65,7 @@ pub enum ProcessYield {
     Empty, /// the coroutine has nothing to do
     Send(Cid, Envelope),
     YieldTo(Cid, Envelope),
-    Spawn(SpawnFunc)
+    Spawn(PreparedCoro)
 }
 pub enum ProcessExit {
     Done,
@@ -99,9 +74,11 @@ pub enum ProcessExit {
 
 #[thread_local] static mut MAX_ID: u32 = 0;
 pub fn bump_id() -> u32 {
-    let id = MAX_ID;
-    MAX_ID += 1;
-    id
+    unsafe {
+        let id = MAX_ID;
+        MAX_ID += 1;
+        id
+    }
 }
 
 pub struct PreparedCoro {
@@ -129,18 +106,19 @@ impl Dispatcher {
             exit: None
         }
     }
-    pub fn spawn<F>(&mut self, func: F) -> Cid where
-        F: Fn(Cid, Inbox) -> GenBox
+    pub fn spawn<F, G>(&mut self, func: F) -> Cid where
+        F: Fn(Cid, Inbox) -> G,
+        G: Generator<Yield=ProcessYield, Return=ProcessExit> + 'static
     {
-        let coro = Self::prepare_spawn(f);
+        let coro = Self::prepare_spawn(|cid, inbox| Box::new(func(cid, inbox)) as GenBox);
         let cid = coro.cid();
         self.spawn_prepared(coro);
         cid
     }
-    pub fn prepare_spawn<F>(f: F) -> PreparedCoro where F: Fn(Cid, Inbox) -> GenBox {
+    pub fn prepare_spawn<F>(func: F) -> PreparedCoro where F: Fn(Cid, Inbox) -> GenBox {
         let cid = Cid(bump_id());
         let inbox = Inbox::new();
-        let process = Process::new(func(addr, inbox.clone()), inbox, addr);
+        let process = Process::new(func(cid, inbox.clone()), inbox);
         PreparedCoro { cid, process } 
     }
     fn spawn_prepared(&mut self, p: PreparedCoro) {
@@ -152,13 +130,14 @@ impl Dispatcher {
         self.processes.get_mut(&addr.0).unwrap().queue(msg);
         self.ready.insert(addr.0);
     }
-    fn resume(&mut self, id: u32) -> GeneratorState<ProcessYield, ProcessExit> {
-        let process = self.processes.get_mut(&id).unwrap();
-        unsafe {
-            process.generator.resume()
-        }
+    fn resume(&mut self, id: u32) -> Option<GeneratorState<ProcessYield, ProcessExit>> {
+        self.processes
+            .get_mut(&id)
+            .map(|process| unsafe {
+                process.generator.resume()
+            })
     }
-    fn yield_to(&mut self, mut addr: Cid, msg: Envelope) {
+    fn yield_to(&mut self, addr: Cid, msg: Envelope) {
         self.send(addr, msg);
         self.run_one(addr.0);
     }
@@ -166,24 +145,29 @@ impl Dispatcher {
         use std::ops::GeneratorState::*;
         println!("running {}", proc_id);
         
-        loop {
-            match self.resume(proc_id) {
-                Yielded(ProcessYield::Send(addr, msg)) => self.send(addr, msg),
-                Yielded(ProcessYield::YieldTo(addr, msg)) => {
-                    self.send(addr, msg);
-                    
-                    // execute id now
-                    proc_id = addr.0;
-                    println!("yield to {:?}", addr);
-                }
-                Yielded(ProcessYield::Spawn(f)) => 
-                Yielded(ProcessYield::Empty) => break,
-                Complete(ProcessExit::Terminate(reason)) => self.exit = Some(reason),
-                Complete(ProcessExit::Done) => {
-                    println!("{} terminated", proc_id);
-                    self.processes.remove(&proc_id);
-                    break;
+        while let Some(state) = self.resume(proc_id) {
+            match state {
+                Yielded(y) => match y { 
+                    ProcessYield::Send(addr, msg) => self.send(addr, msg),
+                    ProcessYield::YieldTo(addr, msg) => {
+                        self.send(addr, msg);
+                        
+                        // execute id now
+                        proc_id = addr.0;
+                        println!("yield to {:?}", addr);
+                    }
+                    ProcessYield::Spawn(coro) => self.spawn_prepared(coro),
+                    ProcessYield::Empty => break
                 },
+                Complete(e) => {
+                    println!("{} terminated", &proc_id);
+                    self.processes.remove(&proc_id);
+                    match e {
+                        ProcessExit::Terminate(reason) => self.exit = Some(reason),
+                        ProcessExit::Done => {}
+                    }
+                    break;
+                }
             }
         }
     }

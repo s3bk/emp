@@ -12,26 +12,26 @@ type Error = bincode::Error;
 
 // can be encoded
 pub trait Sendable: Sized + Serialize + DeserializeOwned + 'static {
-    fn encode(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+    fn encode(&self, mut buffer: &mut Vec<u8>) -> Result<(), Error> {
         let type_id = unsafe {
             mem::transmute::<TypeId, u64>(TypeId::of::<Self>())
         }; // well, what can I do …
         let size = bincode::serialized_size(self)?;
-        bincode::serialize_into(buffer, &size)?;
-        bincode::serialize_into(buffer, self)?;
-        bincode::serialize_into(buffer, &type_id)
+        bincode::serialize_into(&mut buffer, &size)?;
+        bincode::serialize_into(&mut buffer, self)?;
+        bincode::serialize_into(&mut buffer, &type_id)
     }
     
-    fn decode(data: &mut &[u8]) -> Result<Self, Error> {
-        let type_id = bincode::deserialize_from(data)?;
+    fn decode(mut data: &mut &[u8]) -> Result<Self, Error> {
+        let type_id = bincode::deserialize_from(&mut data)?;
         let type_id = unsafe {
             mem::transmute::<u64, TypeId>(type_id)
         }; // … not much.
         assert_eq!(type_id, TypeId::of::<Self>());
         
-        let size: u32 = bincode::deserialize_from(data)?;
+        let size: u32 = bincode::deserialize_from(&mut data)?;
         let remaining_data_len = data.len() - size as usize;
-        let event: Self = bincode::deserialize_from(data)?;
+        let event: Self = bincode::deserialize_from(&mut data)?;
         assert_eq!(data.len(), remaining_data_len);
         
         Ok(event)
