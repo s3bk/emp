@@ -14,54 +14,36 @@ struct Baz(String);
 
 fn main() {
     let mut d = Dispatcher::new();
-    let printer = d.spawn(|_, inbox| move || loop {
-        while let Some(e) = inbox.get() {
-            recv!(e => {
-                String, s => { 
-                    println!("printer: {}", s);
-                }
-            })
+    let printer = d.spawn(dispatcher! {
+        String, s => { 
+            println!("printer: {}", s);
         }
-        
-        yield ProcessYield::Empty;
     });
     
-    let manager = d.spawn(|_, inbox| move || loop {
-        while let Some(e) = inbox.get() {
-            recv!(e => {
-                Connection, c => { 
-                    println!("connection from: {:?}", c.remote());
-                        listener!(c => conn_handler)
-                    }
-                    let handler = spawn!(move || loop {
-                    
-                    });
-                }
-            })
+    let manager = d.spawn(dispatcher! {
+        Connection, c => { 
+            println!("connection from: {:?}", c.remote());
+                listener!(c => conn_handler)
+            }
+            let handler = spawn!(move || loop {
+            
+            });
         }
-        
-        yield ProcessYield::Empty;
     });
     
     let mut any = 0;
     let mut bar = 0;
-    let test = d.spawn(|_, inbox| move || loop {
-        while let Some(e) = inbox.get() {
-            recv!(e => {
-                Foo, _ => {
-                    println!("got a Foo");
-                    any += 1;
-                },
-                Bar, Bar(n) => {
-                    bar += n;
-                    println!("now {} bar", bar);
-                    
-                    yield_to!(printer, format!("{} bars", bar));
-                }
-            })
+    let test = d.spawn(dispatcher! {
+        Foo, _ => {
+            println!("got a Foo");
+            any += 1;
+        },
+        Bar, Bar(n) => {
+            bar += n;
+            println!("now {} bar", bar);
+            
+            yield_to!(printer, format!("{} bars", bar));
         }
-        
-        yield ProcessYield::Empty;
     });
     
     d.send(test, Envelope::pack(Foo));

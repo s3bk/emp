@@ -1,51 +1,63 @@
-extern crate libc;
-
-use std::os::unix::io::RawFd;
-use libc::{c_void, c_int};
+use std::os::unix::io::{RawFd, AsRawFd};
+use libc;
+use sys::*;
 
 pub struct EPoll {
     fd: RawFd
 }
 
-#[thread_local]
-static mut POLL: EPoll { fd: -1 }
-
-
-#[repr(C, packed)]
-struct Event {
-    events: u32,
-    data:   u64
+thread_local! {
+    static POLL: EPoll = EPoll::new();
 }
 
-bitflags! {
-    struct Flags: u32 {
-    
+#[derive(Debug, Copy, Clone)]
+pub struct WakeUp(epoll::Flags);
+
 impl EPoll {
-    pub fn new(size: usize) -> EPoll {
-        fd = epoll_create();
+    pub fn new() -> EPoll {
+        let fd = unsafe { epoll::create() };
         assert!(fd >= 0);
-        EPoll { fd }
+        EPoll { fd: fd as RawFd }
     }
-    fn add(&mut self, fd: RawFd, flags: , data: u64) {
-        let event = Event {
-            events: flags | EPOLLT,
-            data: 
-        epoll_ctl(self.fd, EPOLL_CTL_ADD, fd, &event as *const _ as isize);
+    fn add(&self, fd: RawFd, flags: epoll::Flags, data: u64) {
+        let event = epoll::Event {
+            events: flags.bits() as u32,
+            data:   data
+        };
+        unsafe {
+            epoll::ctl(self.fd, epoll::CtlOp::Add, fd, Some(&event));
+        }
     }
-    fn remove(&mut self, fd: RawFd)
+    fn remove(&self, fd: RawFd) {
+        unsafe {
+            epoll::ctl(self.fd, epoll::CtlOp::Del, fd, None);
+        }
+    }
+}
+impl Drop for EPoll {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
 }
 
-struct RegisteredFd {
+pub struct RegisteredFd {
     fd: RawFd
 }
 impl RegisteredFd {
     pub fn unregister(self) -> RawFd {
-        POLL.remove(self.fd);
+        POLL.with(|p| p.remove(self.fd));
+        self.fd
+    }
+}
+impl AsRawFd for RegisteredFd {
+    fn as_raw_fd(&self) -> RawFd {
         self.fd
     }
 }
 
-
-
-pub fn register(fd: RawFd) -> RegisteredFd {
-    POLL.add(fd, 
+pub fn register(fd: RawFd, flags: epoll::Flags, data: u64) -> RegisteredFd {
+    POLL.with(|p| p.add(fd, flags, data));
+    RegisteredFd { fd }
+}

@@ -1,7 +1,7 @@
 #![feature(generators)]
 
 #[macro_use] extern crate emp;
-use emp::*;
+use emp::prelude::*;
 
 #[derive(Debug)]
 struct Foo;

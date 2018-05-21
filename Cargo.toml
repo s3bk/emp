@@ -7,3 +7,5 @@ authors = ["Sebastian Köln <sebk@rynx.org>"]
 [dependencies]
 bincode = "*"
 serde = "*"
+bitflags = "*"
+syscall-alt = "*"
