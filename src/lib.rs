@@ -1,4 +1,4 @@
-#![feature(generators, generator_trait, get_type_id, const_type_id, thread_local, libc, box_syntax)]
+#![feature(generators, generator_trait, get_type_id, const_type_id, thread_local, libc, box_syntax, nll)]
 
 extern crate bincode;
 extern crate serde;

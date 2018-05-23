@@ -1,6 +1,6 @@
 use std::os::unix::io::{RawFd, AsRawFd};
-use libc;
 use sys::*;
+use std::ops::Deref;
 
 pub struct EPoll {
     fd: RawFd
@@ -15,9 +15,8 @@ pub struct WakeUp(epoll::Flags);
 
 impl EPoll {
     pub fn new() -> EPoll {
-        let fd = unsafe { epoll::create() };
-        assert!(fd >= 0);
-        EPoll { fd: fd as RawFd }
+        let fd = unsafe { epoll::epoll_create() }.unwrap();
+        EPoll { fd }
     }
     fn add(&self, fd: RawFd, flags: epoll::Flags, data: u64) {
         let event = epoll::Event {
@@ -25,39 +24,42 @@ impl EPoll {
             data:   data
         };
         unsafe {
-            epoll::ctl(self.fd, epoll::CtlOp::Add, fd, Some(&event));
+            epoll::epoll_ctl(self.fd, epoll::CtlOp::Add, fd, Some(&event));
         }
     }
     fn remove(&self, fd: RawFd) {
         unsafe {
-            epoll::ctl(self.fd, epoll::CtlOp::Del, fd, None);
+            epoll::epoll_ctl(self.fd, epoll::CtlOp::Del, fd, None);
         }
     }
 }
 impl Drop for EPoll {
     fn drop(&mut self) {
         unsafe {
-            libc::close(self.fd);
+            close(self.fd);
         }
     }
 }
 
-pub struct RegisteredFd {
-    fd: RawFd
+pub struct Registered<F: AsRawFd> {
+    inner: F
 }
-impl RegisteredFd {
-    pub fn unregister(self) -> RawFd {
-        POLL.with(|p| p.remove(self.fd));
-        self.fd
+impl<F: AsRawFd> Deref for Registered<F> {
+    type Target = F;
+    fn deref(&self) -> &F {
+        &self.inner
     }
 }
-impl AsRawFd for RegisteredFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd
+impl<F: AsRawFd> Registered<F> {
+    pub fn unregister(self) -> F {
+        let fd = self.inner.as_raw_fd();
+        POLL.with(|p| p.remove(fd));
+        self.inner
     }
 }
 
-pub fn register(fd: RawFd, flags: epoll::Flags, data: u64) -> RegisteredFd {
+pub fn register<F: AsRawFd>(f: F, flags: epoll::Flags, data: u64) -> Registered<F> {
+    let fd = f.as_raw_fd();
     POLL.with(|p| p.add(fd, flags, data));
-    RegisteredFd { fd }
+    Registered { inner: f }
 }

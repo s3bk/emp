@@ -58,14 +58,14 @@ macro_rules! spawn {
 #[macro_export]
 macro_rules! dispatcher {
     ($( $t:ty, $s:pat => $b:expr ),*) => ({
-        |_, inbox| move || loop {
+        move |_, inbox| move || loop {
             while let Some(e) = inbox.get() {
                 recv!(e => { $( $t, $s => $b ),*  })
             }
             
             yield ProcessYield::Empty;
         }
-    })
+    });
 }
 
 /// request to terminate the programm (not just the current coroutine)
