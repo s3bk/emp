@@ -52,11 +52,13 @@ pub mod epoll {
     }
     bitflags! {
         pub struct Flags: u32 {
-            const LevelTriggered = libc::EPOLLET as u32;
             const In             = libc::EPOLLIN as u32;
-            const Hup            = libc::EPOLLHUP as u32;
             const Out            = libc::EPOLLOUT as u32;
-            const RdHup          = libc::EPOLLRDHUP as u32;
+            const ReadHup        = libc::EPOLLRDHUP as u32;
+            const Pri            = libc::EPOLLPRI as u32;
+            const Err            = libc::EPOLLERR as u32;
+            const Hup            = libc::EPOLLHUP as u32;
+            const EdgeTriggered  = libc::EPOLLET as u32;
         }
     }
     pub enum CtlOp {
@@ -127,6 +129,7 @@ pub mod sock {
         type Data;
         fn domain(&self) -> SockDomain;
         fn data(&self) -> Self::Data;
+        fn from_data(Self::Data) -> Self;
     }
     impl Addr for (Ipv4Addr, u16) {
         type Data = libc::sockaddr_in;
@@ -138,6 +141,11 @@ pub mod sock {
                 sin_addr: libc::in_addr { s_addr: u32::from(self.0).to_be() },
                 sin_zero: [0; 8]
             }
+        }
+        fn from_data(data: Self::Data) -> Self {
+            let addr = u32::from_be(data.sin_addr.s_addr);
+            let port = u16::from_be(data.sin_port);
+            (Ipv4Addr::from(addr), port)
         }
     }
     impl Addr for (Ipv6Addr, u16) {
@@ -152,20 +160,20 @@ pub mod sock {
                 sin6_scope_id: 0
             }
         }
+        fn from_data(data: Self::Data) -> Self {
+            let addr = data.sin6_addr.s6_addr;
+            let port = u16::from_be(data.sin6_port);
+            (Ipv6Addr::from(addr), port)
+        }
     }
     pub unsafe fn bind<A: Addr>(fd: RawFd, addr: A) -> Result<(), Errno> {
         let data = addr.data();
         syscall!(SYS_bind(fd, &data as *const A::Data, mem::size_of_val(&data)) -> 0)
     }
-    pub unsafe fn accept(fd: RawFd, flags: Flags) -> Result<(RawFd, IpAddr), Errno> {
-        let mut addr = [0u8; 16];
-        let mut len: u32 = 16;
+    pub unsafe fn accept<A: Addr>(fd: RawFd, flags: Flags) -> Result<(RawFd, A), Errno> {
+        let mut addr: A::Data = mem::zeroed();
+        let mut len: u32 = mem::size_of::<A::Data>() as u32;
         let fd = syscall!(SYS_accept4(fd, &mut addr as *mut _, &mut len as *mut _, flags.bits()) -> RawFd)?;
-        let ip = match len {
-            4 => [addr[0], addr[1], addr[2], addr[3]].into(),
-            16 => addr.into(),
-            _ => panic!()
-        };
-        Ok((fd, ip))
+        Ok((fd, A::from_data(addr)))
     }
 }

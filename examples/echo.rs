@@ -21,13 +21,13 @@ fn main() {
     });
     let handler = d.spawn(dispatcher! {
         Connection, c => { 
-            let remote = c.remote();
+            let (remote, port) = c.remote();
             println!("connection from: {:?}", remote);
             let handler = spawn!(dispatcher! {
                 Line, Line(s) => {
-                    yield_to!(printer, format!("recieved {} from {}", s, remote));
+                    yield_to!(printer, format!("recieved {} from {}:{}", s, remote, port));
                 },
-                Closed, _ => break
+                Closed, _ => done!()
             });
             spawn!(line_reader(c, handler));
         }

@@ -2,7 +2,7 @@ use prelude::*;
 use epoll;
 use sys;
 use libc;
-use std::net::{IpAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::{RawFd, AsRawFd};
 use std::{mem, slice};
 use sys::epoll::{Flags};
@@ -41,7 +41,7 @@ impl Socket {
         Socket { fd }
     }
     fn accept(&self) -> Option<Connection> {
-        let r = unsafe { sys::sock::accept(self.fd, sys::sock::Flags::NonBlock) };
+        let r = unsafe { sys::sock::accept::<(Ipv4Addr, u16)>(self.fd, sys::sock::Flags::NonBlock) };
         match r {
             Ok((fd, remote)) => Some(Connection { fd, remote }),
             Err(libc::EWOULDBLOCK) => None,
@@ -57,7 +57,7 @@ impl Drop for Socket {
 #[derive(Debug)]
 pub struct Connection {
     fd: RawFd,
-    remote: IpAddr
+    remote: (Ipv4Addr, u16)
 }
 impl Connection {
     pub fn recv_into(&self, buf: &mut Vec<u8>) -> Option<usize> {
@@ -85,7 +85,7 @@ impl Connection {
             Err(e) => panic!("got error: {}", e)
         }
     }
-    pub fn remote(&self) -> IpAddr { self.remote }
+    pub fn remote(&self) -> (Ipv4Addr, u16) { self.remote }
 }
 impl AsRawFd for Connection {
     fn as_raw_fd(&self) -> RawFd {
@@ -117,7 +117,7 @@ pub fn line_reader(conn: Connection, reciever: Cid) -> PreparedCoro {
                                 },
                                 Some(0) => {
                                     send!(reciever, Closed);
-                                    break;
+                                    return ProcessExit::Done;
                                 },
                                 Some(n) => n
                             };

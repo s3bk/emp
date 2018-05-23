@@ -80,3 +80,8 @@ macro_rules! exit {
         }
     ))
 }
+
+#[macro_export]
+macro_rules! done {
+    () => (return $crate::dispatch::ProcessExit::Done)
+}
