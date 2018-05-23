@@ -18,4 +18,5 @@ mod sys;
 pub mod prelude {
     pub use message::*;
     pub use dispatch::*;
+    pub use net::*;
 }

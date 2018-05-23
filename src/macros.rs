@@ -4,8 +4,8 @@
 /// Suspends the current coroutine.
 #[macro_export]
 macro_rules! send {
-    ($addr:expr, $msg:expr) => (yield ProcessYield::Send($addr, Envelope::pack($msg)));  
-    ($msg:expr => $addr:expr) => (yield ProcessYield::Send($addr, Envelope::pack($msg)));
+    ($addr:expr, $msg:expr) => (yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg)));  
+    ($msg:expr => $addr:expr) => (yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg)));
 }
 
 /// yield_to!(cid, message)
@@ -14,8 +14,8 @@ macro_rules! send {
 /// Suspends the current coroutine.
 #[macro_export]
 macro_rules! yield_to {
-    ($addr:expr, $msg:expr) => (yield ProcessYield::YieldTo($addr, Envelope::pack($msg)));  
-    ($msg:expr => $addr:expr) => (yield ProcessYield::YieldTo($addr, Envelope::pack($msg)));
+    ($addr:expr, $msg:expr) => (yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg)));  
+    ($msg:expr => $addr:expr) => (yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg)));
 }
 
 /// recieve messages and handle the specified types
@@ -30,7 +30,8 @@ macro_rules! yield_to {
 #[macro_export]
 macro_rules! recv {
     ( $e:expr => {$( $t:ty, $s:pat => $b:expr ),*  } ) => ({
-        let e: Envelope = $e;
+        use std::any::TypeId;
+        let e: $crate::message::Envelope = $e;
         match e.type_id {
             $( id if id == TypeId::of::<$t>() => {
                 let $s: $t = e.unpack();
@@ -46,25 +47,25 @@ macro_rules! recv {
 /// `spawn!(code)`
 #[macro_export]
 macro_rules! spawn {
-    ($gen:block) => ({
-        let coro = Dispatcher::prepare_spawn($gen);
+    ($coro:expr) => ({
+        let coro = $coro;
         let cid = coro.cid();
-        yield ProcessYield::Spawn(coro);
+        yield $crate::dispatch::ProcessYield::Spawn(coro);
         cid
-    })
+    });
 }
 
-/// create an event dispatcher
+/// create an event dispatch
 #[macro_export]
 macro_rules! dispatcher {
     ($( $t:ty, $s:pat => $b:expr ),*) => ({
-        move |_, inbox| move || loop {
+        Dispatcher::prepare_spawn(move |_, inbox| move || loop {
             while let Some(e) = inbox.get() {
                 recv!(e => { $( $t, $s => $b ),*  })
             }
             
-            yield ProcessYield::Empty;
-        }
+            yield $crate::dispatch::ProcessYield::Empty;
+        })
     });
 }
 
@@ -72,8 +73,8 @@ macro_rules! dispatcher {
 #[macro_export]
 macro_rules! exit {
     ($msg:expr) => (exit!(0, $msg));
-    ($code:expr, $msg:expr) => (return ProcessExit::Terminate(
-        ExitReason {
+    ($code:expr, $msg:expr) => (return $crate::dispatch::ProcessExit::Terminate(
+        $crate::dispatch::ExitReason {
             code: $code,
             msg: $msg
         }

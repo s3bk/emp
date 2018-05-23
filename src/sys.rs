@@ -5,6 +5,7 @@ use syscall_alt::constants::SYS::*;
 use libc;
 use std::os::unix::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::mem;
 
 pub type Errno = i32;
 macro_rules! syscall {
@@ -46,16 +47,16 @@ pub mod epoll {
     
     #[repr(C, packed)]
     pub struct Event {
-        pub events: u32,
+        pub events: Flags,
         pub data:   u64
     }
     bitflags! {
         pub struct Flags: u32 {
-            const LevelTriggered      = libc::EPOLLET as u32;
-            const In      = libc::EPOLLIN as u32;
-            const Hup     = libc::EPOLLHUP as u32;
-            const Out     = libc::EPOLLOUT as u32;
-            const RdHup   = libc::EPOLLRDHUP as u32;
+            const LevelTriggered = libc::EPOLLET as u32;
+            const In             = libc::EPOLLIN as u32;
+            const Hup            = libc::EPOLLHUP as u32;
+            const Out            = libc::EPOLLOUT as u32;
+            const RdHup          = libc::EPOLLRDHUP as u32;
         }
     }
     pub enum CtlOp {
@@ -67,6 +68,9 @@ pub mod epoll {
     }
     pub unsafe fn epoll_ctl(epoll_fd: RawFd, op: CtlOp, fd: RawFd, event: Option<&Event>) -> Result<(), Errno> {
         syscall!(SYS_epoll_ctl(epoll_fd, op, fd, event.map(|r| r as *const Event as isize).unwrap_or(0)) -> 0)
+    }
+    pub unsafe fn epoll_wait(fd: RawFd, set: *mut Event, num_events: usize, timeout: i32) -> Result<usize, Errno> {
+        syscall!(SYS_epoll_wait(fd, set, num_events, timeout) -> usize)
     }
 }
 
@@ -116,24 +120,42 @@ pub mod sock {
     pub unsafe fn socket(domain: SockDomain, stype: SockType) -> Result<RawFd, Errno> {
         syscall!(SYS_socket(domain, stype, 0) -> RawFd)
     }
+    pub unsafe fn listen(fd: RawFd, backlog: i32) -> Result<(), Errno> {
+        syscall!(SYS_listen(fd, backlog) -> 0)
+    }
     pub trait Addr {
         type Data;
         fn domain(&self) -> SockDomain;
         fn data(&self) -> Self::Data;
     }
-    impl Addr for Ipv4Addr {
-        type Data = [u8; 4];
+    impl Addr for (Ipv4Addr, u16) {
+        type Data = libc::sockaddr_in;
         fn domain(&self) -> SockDomain { SockDomain::IPv4 }
-        fn data(&self) -> [u8; 4] { self.octets() }
+        fn data(&self) -> Self::Data {
+            libc::sockaddr_in {
+                sin_family: libc::AF_INET as u16,
+                sin_port: self.1.to_be(),
+                sin_addr: libc::in_addr { s_addr: u32::from(self.0).to_be() },
+                sin_zero: [0; 8]
+            }
+        }
     }
-    impl Addr for Ipv6Addr {
-        type Data = [u8; 16];
+    impl Addr for (Ipv6Addr, u16) {
+        type Data = libc::sockaddr_in6;
         fn domain(&self) -> SockDomain { SockDomain::IPv6 }
-        fn data(&self) -> [u8; 16] { self.octets() }
+        fn data(&self) -> Self::Data {
+            libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET as u16,
+                sin6_port: self.1.to_be(),
+                sin6_flowinfo: 0,
+                sin6_addr: unsafe { mem::transmute(self.0.octets()) },
+                sin6_scope_id: 0
+            }
+        }
     }
-    pub unsafe fn bind<A: Addr>(fd: RawFd, addr: &A) -> Result<(), Errno> {
+    pub unsafe fn bind<A: Addr>(fd: RawFd, addr: A) -> Result<(), Errno> {
         let data = addr.data();
-        syscall!(SYS_bind(fd, addr.domain(), &data as *const A::Data) -> 0)
+        syscall!(SYS_bind(fd, &data as *const A::Data, mem::size_of_val(&data)) -> 0)
     }
     pub unsafe fn accept(fd: RawFd, flags: Flags) -> Result<(RawFd, IpAddr), Errno> {
         let mut addr = [0u8; 16];

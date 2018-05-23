@@ -11,7 +11,7 @@ use epoll::WakeUp;
 const MIN_RECV_SIZE: usize = 128;
 
 #[derive(Debug)]
-pub struct Line(String);
+pub struct Line(pub String);
 
 #[derive(Debug)]
 pub struct Closed;
@@ -25,14 +25,17 @@ impl AsRawFd for Socket {
     }
 }
 impl Socket {
-    fn listen(addr: IpAddr) -> Socket {
+    fn listen(addr: IpAddr, port: u16, backlog: i32) -> Socket {
         use sys::sock::*;
         let fd = unsafe {
             let fd = socket(SockDomain::IPv4, SockType::Tcp).unwrap();
+            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &1i32 as *const _ as _, 4);
             match addr {
-                IpAddr::V4(ip) => bind(fd, &ip),
-                IpAddr::V6(ip) => bind(fd, &ip)
+                IpAddr::V4(ip) => bind(fd, (ip, port)),
+                IpAddr::V6(ip) => bind(fd, (ip, port))
             }.unwrap();
+            listen(fd, backlog).unwrap();
+            
             fd
         };
         Socket { fd }
@@ -57,7 +60,7 @@ pub struct Connection {
     remote: IpAddr
 }
 impl Connection {
-    fn recv_into(&self, buf: &mut Vec<u8>) -> Option<usize> {
+    pub fn recv_into(&self, buf: &mut Vec<u8>) -> Option<usize> {
         let start = buf.len();
         let mut size = buf.capacity() - start;
         // make sure we have some space to read into
@@ -82,6 +85,7 @@ impl Connection {
             Err(e) => panic!("got error: {}", e)
         }
     }
+    pub fn remote(&self) -> IpAddr { self.remote }
 }
 impl AsRawFd for Connection {
     fn as_raw_fd(&self) -> RawFd {
@@ -95,69 +99,78 @@ impl Drop for Connection {
 }
     
 pub fn line_reader(conn: Connection, reciever: Cid) -> PreparedCoro {
-    Dispatcher::prepare_spawn(|id, inbox| move || {
-        let mut cursor = 0; // end of pending data
-        let mut buf = vec![0; 2*MIN_RECV_SIZE];
-        let registration = epoll::register(conn, Flags::LevelTriggered | Flags::In, id.0 as u64);
-        
-        loop {
-            while let Some(e) = inbox.get() {
-                recv!(e => {
-                    WakeUp, _ => {
-                        let n = match registration.recv_into(&mut buf) {
-                            None => {
-                                yield ProcessYield::Io;
-                                continue;
-                            },
-                            Some(0) => {
-                                send!(reciever, Closed);
-                                break;
-                            },
-                            Some(n) => n
-                        };
-                        
-                        if let Some(end) = buf[cursor .. cursor + n].iter().position(|&b| b == b'\n') {
-                            let remaining = buf.split_off(end+1);
-                            let line = mem::replace(&mut buf, remaining);
-                            cursor = 0;
-                            
-                            if let Ok(line) = String::from_utf8(line) {
-                                send!(reciever, Line(line));
+    Dispatcher::prepare_spawn(|id, inbox| {
+        let event = epoll::Event { events: Flags::In, data: id.0 as u64 };
+        let registration = epoll::register(conn, event);
+        move || {
+            let mut cursor = 0; // end of pending data
+            let mut buf = vec![0; 2*MIN_RECV_SIZE];
+            
+            loop {
+                while let Some(e) = inbox.get() {
+                    recv!(e => {
+                        WakeUp, _ => {
+                            println!("buf at {:p}", buf.as_mut_ptr());
+                            let n = match registration.recv_into(&mut buf) {
+                                None => {
+                                    yield ProcessYield::Io;
+                                    continue;
+                                },
+                                Some(0) => {
+                                    send!(reciever, Closed);
+                                    break;
+                                },
+                                Some(n) => n
+                            };
+                            println!("n={}", n);
+                            println!("buf: {:?}", buf);
+                            if let Some(end) = buf[cursor .. cursor + n].iter().position(|&b| b == b'\n') {
+                                let remaining = buf.split_off(end+1);
+                                let line = mem::replace(&mut buf, remaining);
+                                cursor = 0;
+                                
+                                eprintln!("line: {:?}", line);
+                                if let Ok(line) = String::from_utf8(line) {
+                                    eprintln!("line: {:?}", line);
+                                    send!(reciever, Line(line));
+                                }
                             }
                         }
-                    }
-                })
+                    })
+                }
+                
+                yield ProcessYield::Empty;
             }
-            
-            yield ProcessYield::Empty;
         }
     })
 }
 
-pub fn listener(addr: IpAddr, reciever: Cid) -> PreparedCoro {
-    Dispatcher::prepare_spawn(move |id, inbox| move || {
-        let socket = Socket::listen(addr);
-        let socket = epoll::register(socket, Flags::LevelTriggered | Flags::In, id.0 as u64);
-        
-        loop {
-            while let Some(e) = inbox.get() {
-                recv!(e => {
-                    WakeUp, _ => {
-                        match socket.accept() {
-                            None => {
-                                yield ProcessYield::Io;
-                                continue;
-                            }
-                            Some(c) => {
-                                send!(reciever, c);
-                                break;
+pub fn listener(addr: IpAddr, port: u16, reciever: Cid) -> PreparedCoro {
+    Dispatcher::prepare_spawn(move |id, inbox| {
+        let socket = Socket::listen(addr, port, 10);
+        let event = epoll::Event { events: Flags::In, data: id.0 as u64 };
+        let socket = epoll::register(socket, event);
+        move || {
+            loop {
+                while let Some(e) = inbox.get() {
+                    recv!(e => {
+                        WakeUp, _ => {
+                            match socket.accept() {
+                                None => {
+                                    yield ProcessYield::Io;
+                                    continue;
+                                }
+                                Some(c) => {
+                                    send!(reciever, c);
+                                    break;
+                                }
                             }
                         }
-                    }
-                })
+                    })
+                }
+                
+                yield ProcessYield::Empty;
             }
-            
-            yield ProcessYield::Empty;
         }
     })
 }

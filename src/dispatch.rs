@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::ops::GeneratorState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use message::*;
+use epoll;
 
 /// unique identifier for each coroutine
 #[derive(Debug, Copy, Clone)]
@@ -112,21 +113,14 @@ pub struct Dispatcher {
 }
 impl Dispatcher {
     pub fn new() -> Dispatcher {
-        Dispatcher {
+        let mut d = Dispatcher {
             processes: HashMap::new(),
             ready: HashSet::new(),
             ready2: Some(HashSet::new()),
             exit: None
-        }
-    }
-    pub fn spawn<F, G>(&mut self, func: F) -> Cid where
-        F: FnOnce(Cid, Inbox) -> G,
-        G: Generator<Yield=ProcessYield, Return=ProcessExit> + 'static
-    {
-        let coro = Self::prepare_spawn(func);
-        let cid = coro.cid();
-        self.spawn_prepared(coro);
-        cid
+        };
+        let s = d.spawn(epoll::sleeper());
+        d
     }
     pub fn prepare_spawn<F, G>(func: F) -> PreparedCoro where
         F: FnOnce(Cid, Inbox) -> G,
@@ -137,9 +131,10 @@ impl Dispatcher {
         let process = Process::new(box func(cid, inbox.clone()) as GenBox, inbox);
         PreparedCoro { cid, process } 
     }
-    fn spawn_prepared(&mut self, p: PreparedCoro) {
+    pub fn spawn(&mut self, p: PreparedCoro) -> Cid {
         let PreparedCoro { cid, process } = p;
         assert!(self.processes.insert(cid.0, process).is_none());
+        cid
     }
     pub fn send(&mut self, addr: Cid, msg: Envelope) {
         println!("send {:?} to {:?}", msg, addr);
@@ -172,7 +167,9 @@ impl Dispatcher {
                         proc_id = addr.0;
                         println!("yield to {:?}", addr);
                     }
-                    ProcessYield::Spawn(coro) => self.spawn_prepared(coro),
+                    ProcessYield::Spawn(coro) => {
+                        self.spawn(coro);
+                    }
                     ProcessYield::Empty => break,
                     ProcessYield::Io => break,
                 },
