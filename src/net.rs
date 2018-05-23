@@ -104,13 +104,12 @@ pub fn line_reader(conn: Connection, reciever: Cid) -> PreparedCoro {
         let registration = epoll::register(conn, event);
         move || {
             let mut cursor = 0; // end of pending data
-            let mut buf = vec![0; 2*MIN_RECV_SIZE];
+            let mut buf = Vec::with_capacity(2*MIN_RECV_SIZE);
             
             loop {
                 while let Some(e) = inbox.get() {
                     recv!(e => {
                         WakeUp, _ => {
-                            println!("buf at {:p}", buf.as_mut_ptr());
                             let n = match registration.recv_into(&mut buf) {
                                 None => {
                                     yield ProcessYield::Io;
@@ -122,16 +121,13 @@ pub fn line_reader(conn: Connection, reciever: Cid) -> PreparedCoro {
                                 },
                                 Some(n) => n
                             };
-                            println!("n={}", n);
-                            println!("buf: {:?}", buf);
                             if let Some(end) = buf[cursor .. cursor + n].iter().position(|&b| b == b'\n') {
                                 let remaining = buf.split_off(end+1);
                                 let line = mem::replace(&mut buf, remaining);
                                 cursor = 0;
                                 
-                                eprintln!("line: {:?}", line);
-                                if let Ok(line) = String::from_utf8(line) {
-                                    eprintln!("line: {:?}", line);
+                                if let Ok(mut line) = String::from_utf8(line) {
+                                    line.pop();
                                     send!(reciever, Line(line));
                                 }
                             }
