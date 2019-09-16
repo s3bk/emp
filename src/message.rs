@@ -39,7 +39,7 @@ pub trait Sendable: Sized + Serialize + DeserializeOwned + 'static {
 }
 
 pub struct Envelope {
-    event: Box<Message>,
+    event: Box<dyn Message>,
     pub type_id: TypeId
 }
 

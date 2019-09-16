@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::ops::GeneratorState;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::pin::Pin;
 use message::*;
 use epoll;
 
@@ -78,7 +79,7 @@ fn bump_id() -> u32 {
 }
 
 /// actual generator when running
-pub type GenBox = Box<Generator<Yield=ProcessYield, Return=ProcessExit>>;
+pub type GenBox = Pin<Box<dyn Generator<Yield=ProcessYield, Return=ProcessExit>>>;
 struct Process {
     generator: GenBox,
     inbox: Inbox
@@ -128,8 +129,9 @@ impl Dispatcher {
     {
         let cid = Cid(bump_id());
         let inbox = Inbox::new();
-        let process = Process::new(box func(cid, inbox.clone()) as GenBox, inbox);
-        PreparedCoro { cid, process } 
+        let gen = Box::pin(func(cid, inbox.clone()));
+        let process = Process::new(gen as GenBox, inbox);
+        PreparedCoro { cid, process }
     }
     pub fn spawn(&mut self, p: PreparedCoro) -> Cid {
         let PreparedCoro { cid, process } = p;
@@ -145,7 +147,7 @@ impl Dispatcher {
         self.processes
             .get_mut(&id)
             .map(|process| unsafe {
-                process.generator.resume()
+                process.generator.as_mut().resume()
             })
     }
     fn yield_to(&mut self, addr: Cid, msg: Envelope) {

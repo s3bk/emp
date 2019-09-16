@@ -51,7 +51,7 @@ impl EPoll {
 impl Drop for EPoll {
     fn drop(&mut self) {
         unsafe {
-            close(self.fd);
+            let _ = close(self.fd);
         }
     }
 }

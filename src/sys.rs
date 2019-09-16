@@ -4,7 +4,7 @@ use syscall_alt::syscalls::*;
 use syscall_alt::constants::SYS::*;
 use libc;
 use std::os::unix::prelude::*;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::mem;
 
 pub type Errno = i32;
@@ -81,13 +81,13 @@ pub mod msg {
     
     bitflags! {
         pub struct Flags: u32 {
-            const CloseOnExec      = libc::MSG_CMSG_CLOEXEC as u32;
-            const DontWait      = libc::MSG_DONTWAIT as u32;
+            const CloseOnExec  = libc::MSG_CMSG_CLOEXEC as u32;
+            const DontWait     = libc::MSG_DONTWAIT as u32;
             const ErrQueue     = libc::MSG_ERRQUEUE as u32;
-            const OutOfBounds     = libc::MSG_OOB as u32;
-            const Peek   = libc::MSG_PEEK as u32;
-            const Truncate  = libc::MSG_TRUNC as u32;
-            const WaitAll = libc::MSG_WAITALL as u32;
+            const OutOfBounds  = libc::MSG_OOB as u32;
+            const Peek         = libc::MSG_PEEK as u32;
+            const Truncate     = libc::MSG_TRUNC as u32;
+            const WaitAll      = libc::MSG_WAITALL as u32;
         }
     }
 
