@@ -1,8 +1,8 @@
 use std::os::unix::io::{RawFd, AsRawFd};
-use sys::*;
-pub use sys::epoll::Event;
+use crate::sys::{epoll::Event, *};
 use std::ops::Deref;
-use dispatch::{Dispatcher, PreparedCoro, Sleep, Cid, ProcessYield};
+use crate::dispatch::{Dispatcher, PreparedCoro, Sleep, Cid, ProcessYield};
+use crate::message::Envelope;
 
 pub struct EPoll {
     fd: RawFd
@@ -80,30 +80,26 @@ pub fn register<F: AsRawFd>(f: F, event: epoll::Event) -> Registered<F> {
 }
 
 pub fn sleeper() -> PreparedCoro {
-    Dispatcher::prepare_spawn(move |_, inbox| move || {
+    Dispatcher::prepare_spawn(move |cid| move |_: Option<Envelope>| {
         let mut events = Vec::with_capacity(1024);
         loop {
-            while let Some(e) = inbox.get() {
-                recv!(e => {
-                    Sleep, _ => {
-                        match POLL.with(|p| p.wait(&mut events)) {
-                            Ok(()) => {
-                                for i in 0 .. events.len() {
-                                    let epoll::Event { events, data } = events[i];
-                                    send!(Cid(data as u32), WakeUp(events));
-                                }
-                                events.clear();
-                            },
-                            Err(e) => {
-                                eprintln!("epoll::wait -> {:?}", e);
-                                exit!(1, "epoll failed");
+            recv!{
+                Sleep, _ => {
+                    match POLL.with(|p| p.wait(&mut events)) {
+                        Ok(()) => {
+                            for i in 0 .. events.len() {
+                                let epoll::Event { events, data } = events[i];
+                                send!(Cid(data as u32), WakeUp(events));
                             }
+                            events.clear();
+                        },
+                        Err(e) => {
+                            eprintln!("epoll::wait -> {:?}", e);
+                            exit!(1, "epoll failed");
                         }
                     }
-                })
+                }
             }
-            
-            yield ProcessYield::Empty;
         }
     })
 }

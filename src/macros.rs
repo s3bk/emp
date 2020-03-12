@@ -1,11 +1,19 @@
+#[macro_export]
+macro_rules! no_msg {
+    (yield $e:expr) => ({
+        let e: Option<$crate::message::Envelope> = yield $e;
+        assert!(e.is_none());
+    })
+}
+
 /// send!(cid, message)
 ///
 /// Send a message to the coroutine identified by cid.
 /// Suspends the current coroutine.
 #[macro_export]
 macro_rules! send {
-    ($addr:expr, $msg:expr) => (yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg)));  
-    ($msg:expr => $addr:expr) => (yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg)));
+    ($addr:expr, $msg:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg))));
+    ($msg:expr => $addr:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg))));
 }
 
 /// yield_to!(cid, message)
@@ -14,8 +22,13 @@ macro_rules! send {
 /// Suspends the current coroutine.
 #[macro_export]
 macro_rules! yield_to {
-    ($addr:expr, $msg:expr) => (yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg)));  
-    ($msg:expr => $addr:expr) => (yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg)));
+    ($addr:expr, $msg:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg))));  
+    ($msg:expr => $addr:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg))));
+}
+
+#[macro_export]
+macro_rules! io {
+    () => (no_msg!(yield $crate::dispatch::ProcessYield::Io))
 }
 
 /// recieve messages and handle the specified types
@@ -29,15 +42,16 @@ macro_rules! yield_to {
 /// ```
 #[macro_export]
 macro_rules! recv {
-    ( $e:expr => {$( $t:ty, $s:pat => $b:expr ),*  } ) => ({
+    {$( $t:ty, $s:pat => $b:expr ),*  } => ({
         use std::any::TypeId;
-        let e: $crate::message::Envelope = $e;
-        match e.type_id {
-            $( id if id == TypeId::of::<$t>() => {
-                let $s: $t = e.unpack();
-                $b
-            } )*,
-            _ => {}
+        while let Some(envelope) = (yield $crate::dispatch::ProcessYield::Empty) {
+            match envelope.type_id {
+                $( id if id == TypeId::of::<$t>() => {
+                    let $s: $t = envelope.unpack();
+                    $b;
+                } )*,
+                _ => {}
+            }
         }
     })
 }
@@ -50,7 +64,7 @@ macro_rules! spawn {
     ($coro:expr) => ({
         let coro = $coro;
         let cid = coro.cid();
-        yield $crate::dispatch::ProcessYield::Spawn(coro);
+        no_msg!(yield $crate::dispatch::ProcessYield::Spawn(coro));
         cid
     });
 }
@@ -59,12 +73,9 @@ macro_rules! spawn {
 #[macro_export]
 macro_rules! dispatcher {
     ($( $t:ty, $s:pat => $b:expr ),*) => ({
-        Dispatcher::prepare_spawn(move |_, inbox| move || loop {
-            while let Some(e) = inbox.get() {
-                recv!(e => { $( $t, $s => $b ),*  })
-            }
-            
-            yield $crate::dispatch::ProcessYield::Empty;
+        Dispatcher::prepare_spawn(move |_| move |_: Option<$crate::message::Envelope>| {
+            recv!{ $( $t, $s => $b ),* }
+            ProcessExit::Done
         })
     });
 }

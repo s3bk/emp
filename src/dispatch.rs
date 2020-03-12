@@ -1,34 +1,35 @@
 pub use std::any::{TypeId};
 use std::ops::Generator;
 use std::mem;
-use std::rc::Rc;
-use std::cell::RefCell;
 use std::ops::GeneratorState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
-use message::*;
-use epoll;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::future::Future;
+use std::task::{Context, Waker, Poll};
+use crate::message::*;
+use crate::epoll;
+use slotmap::{SlotMap, new_key_type};
 
 /// unique identifier for each coroutine
 #[derive(Debug, Copy, Clone)]
 pub struct Cid(pub u32);
 
 /// message inbox of each coroutine
-#[derive(Clone)]
 pub struct Inbox {
-    inner: Rc<RefCell<VecDeque<Envelope>>>
+    inner: VecDeque<Envelope>
 }
 impl Inbox {
     fn new() -> Inbox {
         Inbox {
-            inner: Rc::new(RefCell::new(VecDeque::new()))
+            inner: VecDeque::new()
         }
     }
-    pub fn get(&self) -> Option<Envelope> {
-        self.inner.borrow_mut().pop_front()
+    pub fn get(&mut self) -> Option<Envelope> {
+        self.inner.pop_front()
     }
-    fn put(&self, msg: Envelope) {
-        self.inner.borrow_mut().push_back(msg);
+    fn put(&mut self, msg: Envelope) {
+        self.inner.push_back(msg);
     }
 }
 
@@ -79,18 +80,14 @@ fn bump_id() -> u32 {
 }
 
 /// actual generator when running
-pub type GenBox = Pin<Box<dyn Generator<Yield=ProcessYield, Return=ProcessExit>>>;
+pub type GenBox = Pin<Box<dyn Generator<Option<Envelope>, Yield=ProcessYield, Return=ProcessExit>>>;
+pub type FutBox = Pin<Box<dyn Future<Output=(Cid, Envelope)>>>;
 struct Process {
     generator: GenBox,
-    inbox: Inbox
+    inbox: Inbox,
+    empty: bool
 }
 impl Process {
-    fn new(generator: GenBox, inbox: Inbox) -> Process {
-        Process {
-            generator,
-            inbox
-        }
-    }
     fn queue(&mut self, msg: Envelope) {
         self.inbox.put(msg);
     }
@@ -106,31 +103,46 @@ impl PreparedCoro {
     }
 }
 
+new_key_type! {
+    struct FutureKey;
+}
+
 pub struct Dispatcher {
     processes: HashMap<u32, Process>,
+    futures: SlotMap<FutureKey, (FutBox, Waker)>,
     ready: HashSet<u32>,
     ready2: Option<HashSet<u32>>,
-    exit: Option<ExitReason>
+    exit: Option<ExitReason>,
+    wake_rx: Receiver<u32>,
+    wake_tx: Sender<u32>
 }
 impl Dispatcher {
     pub fn new() -> Dispatcher {
+        let (wake_tx, wake_rx) = channel();
         let mut d = Dispatcher {
             processes: HashMap::new(),
+            futures: SlotMap::with_key(),
             ready: HashSet::new(),
             ready2: Some(HashSet::new()),
-            exit: None
+            exit: None,
+            wake_rx,
+            wake_tx
         };
         let s = d.spawn(epoll::sleeper());
         d
     }
     pub fn prepare_spawn<F, G>(func: F) -> PreparedCoro where
-        F: FnOnce(Cid, Inbox) -> G,
-        G: Generator<Yield=ProcessYield, Return=ProcessExit> + 'static
+        F: FnOnce(Cid) -> G,
+        G: Generator<Option<Envelope>, Yield=ProcessYield, Return=ProcessExit> + 'static
     {
         let cid = Cid(bump_id());
         let inbox = Inbox::new();
-        let gen = Box::pin(func(cid, inbox.clone()));
-        let process = Process::new(gen as GenBox, inbox);
+        let gen = Box::pin(func(cid));
+        let process = Process {
+            generator: gen as GenBox,
+            inbox,
+            empty: false
+        };
         PreparedCoro { cid, process }
     }
     pub fn spawn(&mut self, p: PreparedCoro) -> Cid {
@@ -138,29 +150,59 @@ impl Dispatcher {
         assert!(self.processes.insert(cid.0, process).is_none());
         cid
     }
+
     pub fn send(&mut self, addr: Cid, msg: Envelope) {
         println!("send {:?} to {:?}", msg, addr);
         self.processes.get_mut(&addr.0).unwrap().queue(msg);
         self.ready.insert(addr.0);
     }
+
+    fn poll_future(&mut self, key: FutureKey) {
+        let (future, waker) = self.futures.get_mut(key).expect("no such future");
+        let mut context = Context::from_waker(waker);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready((cid, msg)) => {
+                self.futures.remove(key);
+                self.yield_to(cid, msg);
+            }
+            Poll::Pending => {
+                info!("future {:?}: spurius wakeup", key);
+            }
+        }
+    }
+
     fn resume(&mut self, id: u32) -> Option<GeneratorState<ProcessYield, ProcessExit>> {
-        self.processes
-            .get_mut(&id)
-            .map(|process| unsafe {
-                process.generator.as_mut().resume()
-            })
+        let process = match self.processes.get_mut(&id) {
+            None => return None,
+            Some(p) => p,
+        };
+        
+        // we only deliver an envelope if the process asked for it.
+        // otherwise it would get lost anyway
+        let msg = match process.empty {
+            true => match process.inbox.get() {
+                Some(msg) => Some(msg),
+                None => return None, // if the process wants mail but we have non, return None to break the loop
+            },
+            false => None
+        };
+        let r = process.generator.as_mut().resume(msg);
+        process.empty = match r {
+            GeneratorState::Yielded(ProcessYield::Empty) => true,
+            _ => false
+        };
+        Some(r)
     }
     fn yield_to(&mut self, addr: Cid, msg: Envelope) {
         self.send(addr, msg);
         self.run_one(addr.0);
     }
     fn run_one(&mut self, mut proc_id: u32) {
-        use std::ops::GeneratorState::*;
         println!("running {}", proc_id);
         
         while let Some(state) = self.resume(proc_id) {
             match state {
-                Yielded(y) => match y { 
+                GeneratorState::Yielded(y) => match y { 
                     ProcessYield::Send(addr, msg) => self.send(addr, msg),
                     ProcessYield::YieldTo(addr, msg) => {
                         self.send(addr, msg);
@@ -172,10 +214,10 @@ impl Dispatcher {
                     ProcessYield::Spawn(coro) => {
                         self.spawn(coro);
                     }
-                    ProcessYield::Empty => break,
+                    ProcessYield::Empty => continue,
                     ProcessYield::Io => break,
                 },
-                Complete(e) => {
+                GeneratorState::Complete(e) => {
                     println!("{} terminated", &proc_id);
                     self.processes.remove(&proc_id);
                     match e {

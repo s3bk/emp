@@ -129,7 +129,7 @@ pub mod sock {
         type Data;
         fn domain(&self) -> SockDomain;
         fn data(&self) -> Self::Data;
-        fn from_data(Self::Data) -> Self;
+        fn from_data(data: Self::Data) -> Self;
     }
     impl Addr for (Ipv4Addr, u16) {
         type Data = libc::sockaddr_in;
