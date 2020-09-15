@@ -1,4 +1,4 @@
-#![feature(generators, generator_trait, const_type_id, thread_local, libc, box_syntax, nll)]
+#![feature(generators, generator_trait, thread_local, libc, wake_trait)]
 
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate log;

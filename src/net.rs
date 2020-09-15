@@ -4,6 +4,7 @@ use crate::sys::{
     epoll::{Flags, Event},
     sock
 };
+use slotmap::KeyData;
 use libc;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::{RawFd, AsRawFd};
@@ -11,6 +12,7 @@ use std::{mem, slice};
 use crate::prelude::*;
 use crate::message::Envelope;
 const MIN_RECV_SIZE: usize = 128;
+const EWOULDBLOCK: i64 = libc::EWOULDBLOCK as i64;
 
 #[derive(Debug)]
 pub struct Line(pub String);
@@ -46,7 +48,7 @@ impl Socket {
         let r = unsafe { sys::sock::accept::<(Ipv4Addr, u16)>(self.fd, sys::sock::Flags::NonBlock) };
         match r {
             Ok((fd, remote)) => Some(Connection { fd, remote }),
-            Err(libc::EWOULDBLOCK) => None,
+            Err(EWOULDBLOCK) => None,
             Err(e) => panic!("got error {}", e)
         }
     }
@@ -83,7 +85,7 @@ impl Connection {
                 }
                 Some(n)
             },
-            Err(libc::EWOULDBLOCK) => None,
+            Err(EWOULDBLOCK) => None,
             Err(e) => panic!("got error: {}", e)
         }
     }
@@ -100,35 +102,34 @@ impl Drop for Connection {
     }
 }
     
-pub fn line_reader(conn: Connection, reciever: Cid) -> PreparedCoro {
-    Dispatcher::prepare_spawn(|id| {
-        let event = Event { events: Flags::In, data: id.0 as u64 };
-        let registration = epoll::register(conn, event);
-        move |_: Option<Envelope>| {
-            let mut cursor = 0; // end of pending data
-            let mut buf = Vec::with_capacity(2*MIN_RECV_SIZE);
-            
-            loop {
-                recv!{
-                    WakeUp, _ => {
-                        match registration.recv_into(&mut buf) {
-                            None => {
-                                io!();
-                            },
-                            Some(0) => {
-                                send!(reciever, Closed);
-                                return ProcessExit::Done;
-                            },
-                            Some(n) => {
-                                if let Some(end) = buf[cursor .. cursor + n].iter().position(|&b| b == b'\n') {
-                                    let remaining = buf.split_off(end+1);
-                                    let line = mem::replace(&mut buf, remaining);
-                                    cursor = 0;
-                                    
-                                    if let Ok(mut line) = String::from_utf8(line) {
-                                        line.pop();
-                                        send!(reciever, Line(line));
-                                    }
+pub fn line_reader(id: Cid, conn: Connection, reciever: Cid) -> GenBox {
+    let event = Event { events: Flags::In, data: id.as_ffi() };
+    let registration = epoll::register(conn, event);
+
+    Box::pin(Box::new(move |_: ResumeArg| {
+        let mut cursor = 0; // end of pending data
+        let mut buf = Vec::with_capacity(2*MIN_RECV_SIZE);
+        
+        loop {
+            recv!{
+                WakeUp, _ => {
+                    match registration.recv_into(&mut buf) {
+                        None => {
+                            io!();
+                        },
+                        Some(0) => {
+                            send!(reciever, Closed);
+                            return ProcessExit::Done;
+                        },
+                        Some(n) => {
+                            if let Some(end) = buf[cursor .. cursor + n].iter().position(|&b| b == b'\n') {
+                                let remaining = buf.split_off(end+1);
+                                let line = mem::replace(&mut buf, remaining);
+                                cursor = 0;
+                                
+                                if let Ok(mut line) = String::from_utf8(line) {
+                                    line.pop();
+                                    send!(reciever, Line(line));
                                 }
                             }
                         }
@@ -136,21 +137,21 @@ pub fn line_reader(conn: Connection, reciever: Cid) -> PreparedCoro {
                 }
             }
         }
-    })
+    }))
 }
 
-pub fn listener(addr: IpAddr, port: u16, reciever: Cid) -> PreparedCoro {
-    Dispatcher::prepare_spawn(move |id| {
-        let socket = Socket::listen(addr, port, 10);
-        let event = Event { events: Flags::In, data: id.0 as u64 };
-        let socket = epoll::register(socket, event);
-        move |_: Option<Envelope>| {
+pub fn listener(id: Cid, addr: IpAddr, port: u16, reciever: Cid) -> GenBox {
+    let socket = Socket::listen(addr, port, 10);
+    let event = Event { events: Flags::In, data: id.as_ffi() };
+    let socket = epoll::register(socket, event);
+    Box::pin(Box::new({
+        move |_: ResumeArg| {
             loop {
                 recv!{
                     WakeUp, _ => {
                         match socket.accept() {
                             None => {
-                                yield ProcessYield::Io;
+                                io!();
                             }
                             Some(c) => {
                                 send!(reciever, c);
@@ -160,6 +161,5 @@ pub fn listener(addr: IpAddr, port: u16, reciever: Cid) -> PreparedCoro {
                 }
             }
         }
-    })
+    }))
 }
-    

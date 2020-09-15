@@ -1,15 +1,16 @@
 [package]
 name = "emp"
 description = "Erlang style Message Passing using generators"
-version = "0.1.0"
-authors = ["Sebastian Köln <sebk@rynx.org>"]
+version = "0.2.0"
+authors = ["Sebastian Köln <s3bk@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
 bincode = "*"
 serde = "*"
 bitflags = "*"
-syscall-alt = "*"
+syscalls = "*"
 libc = "*"
 log = "*"
 slotmap = { version = "*", features = ["unstable"] }
+crossbeam = "*"

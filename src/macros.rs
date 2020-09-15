@@ -1,8 +1,10 @@
 #[macro_export]
 macro_rules! no_msg {
     (yield $e:expr) => ({
-        let e: Option<$crate::message::Envelope> = yield $e;
-        assert!(e.is_none());
+        match (yield $e) {
+            $crate::dispatch::ResumeArg::Empty => (),
+            _ => unreachable!()
+        }
     })
 }
 
@@ -14,16 +16,6 @@ macro_rules! no_msg {
 macro_rules! send {
     ($addr:expr, $msg:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg))));
     ($msg:expr => $addr:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::Send($addr, $crate::message::Envelope::pack($msg))));
-}
-
-/// yield_to!(cid, message)
-///
-/// Send a message to the coroutine identified by cid, and switch execution to it.
-/// Suspends the current coroutine.
-#[macro_export]
-macro_rules! yield_to {
-    ($addr:expr, $msg:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg))));  
-    ($msg:expr => $addr:expr) => (no_msg!(yield $crate::dispatch::ProcessYield::YieldTo($addr, $crate::message::Envelope::pack($msg))));
 }
 
 #[macro_export]
@@ -44,13 +36,19 @@ macro_rules! io {
 macro_rules! recv {
     {$( $t:ty, $s:pat => $b:expr ),*  } => ({
         use std::any::TypeId;
-        while let Some(envelope) = (yield $crate::dispatch::ProcessYield::Empty) {
-            match envelope.type_id {
-                $( id if id == TypeId::of::<$t>() => {
-                    let $s: $t = envelope.unpack();
-                    $b;
-                } )*,
-                _ => {}
+        loop {
+            match (yield $crate::dispatch::ProcessYield::Empty) {
+                $crate::dispatch::ResumeArg::Message(envelope) => {
+                    match envelope.type_id {
+                        $( id if id == TypeId::of::<$t>() => {
+                            let $s: $t = envelope.unpack();
+                            $b;
+                        } )*,
+                        _ => {}
+                    }
+                },
+                $crate::dispatch::ResumeArg::Empty => break,
+                _ => unreachable!()
             }
         }
     })
@@ -61,11 +59,18 @@ macro_rules! recv {
 /// `spawn!(code)`
 #[macro_export]
 macro_rules! spawn {
+    (|$cid:ident| $coro:expr) => {
+        match (yield $crate::dispatch::ProcessYield::Spawn2(Box::new(move |$cid: $crate::dispatch::Cid| $coro))) {
+            $crate::dispatch::ResumeArg::Spawned(cid) => cid,
+            _ => unreachable!()
+        }
+    };
     ($coro:expr) => ({
         let coro = $coro;
-        let cid = coro.cid();
-        no_msg!(yield $crate::dispatch::ProcessYield::Spawn(coro));
-        cid
+        match (yield $crate::dispatch::ProcessYield::Spawn(coro)) {
+            $crate::dispatch::ResumeArg::Spawned(cid) => cid,
+            _ => unreachable!()
+        }
     });
 }
 
@@ -73,10 +78,10 @@ macro_rules! spawn {
 #[macro_export]
 macro_rules! dispatcher {
     ($( $t:ty, $s:pat => $b:expr ),*) => ({
-        Dispatcher::prepare_spawn(move |_| move |_: Option<$crate::message::Envelope>| {
+        Box::pin(Box::new(move |_: $crate::dispatch::ResumeArg| {
             recv!{ $( $t, $s => $b ),* }
             ProcessExit::Done
-        })
+        }))
     });
 }
 

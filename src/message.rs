@@ -1,5 +1,5 @@
 use std::any::TypeId;
-use std::mem;
+use std::{mem, ptr};
 use serde::{ser::Serialize, de::DeserializeOwned};
 use std::fmt::{self, Debug};
 use bincode;
@@ -38,12 +38,23 @@ pub trait Sendable: Sized + Serialize + DeserializeOwned + 'static {
     }
 }
 
+type Payload = [usize; 2];
+#[derive(Debug)]
+enum Data {
+    Inline(Payload),
+    Box(Box<dyn Message>)
+}
+
 pub struct Envelope {
-    event: Box<dyn Message>,
+    event: Data,
     pub type_id: TypeId
 }
 
-
+const fn is_inline<T>() -> bool {
+    !mem::needs_drop::<T>() &&
+    mem::size_of::<T>() <= mem::size_of::<Payload>() &&
+    mem::align_of::<T>() <= mem::align_of::<Payload>()
+}
 
 /* envelope is encoded as:
   type_id u64
@@ -53,8 +64,18 @@ pub struct Envelope {
 
 impl Envelope {
     pub fn pack<T: Message + 'static>(e: T) -> Envelope {
+        let event = if is_inline::<T>() {
+            let mut data = [0; 2];
+            unsafe {
+                ptr::write(data.as_mut_ptr() as *mut T, e);
+            }
+            Data::Inline(data)
+        } else {
+            Data::Box(Box::new(e))
+        };
+
         Envelope {
-            event: Box::new(e),
+            event,
             type_id: TypeId::of::<T>()
         }
     }
@@ -62,9 +83,21 @@ impl Envelope {
         let Envelope { event, type_id } = self;
         assert_eq!(type_id, TypeId::of::<T>());
         
-        unsafe {
-            let ptr = Box::into_raw(event);
-            *Box::from_raw(ptr as *mut T)
+        if is_inline::<T>() {
+            match event {
+                Data::Inline(data) => unsafe {
+                    ptr::read::<T>(&data as *const usize as *const T)
+                }
+                Data::Box(_) => unreachable!()
+            }
+        } else {
+            match event {
+                Data::Box(b) => unsafe {
+                    let ptr = Box::into_raw(b);
+                    *Box::from_raw(ptr as *mut T)
+                }
+                Data::Inline(_) => unreachable!()
+            }
         }
     }
 }

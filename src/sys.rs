@@ -1,45 +1,15 @@
 #![allow(non_upper_case_globals)]
 
-use syscall_alt::syscalls::*;
-use syscall_alt::constants::SYS::*;
+use syscalls::syscall;
 use libc;
 use std::os::unix::prelude::*;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::mem;
 
-pub type Errno = i32;
-macro_rules! syscall {
-    (@CALL $name:ident) =>
-        (syscall0($name));
-    (@CALL $name:ident, $a:expr) =>
-        (syscall1($name, $a));
-    (@CALL $name:ident, $a:expr, $b:expr) =>
-        (syscall2($name, $a, $b));
-    (@CALL $name:ident, $a:expr, $b:expr, $c:expr) =>
-        (syscall3($name, $a, $b, $c));
-    (@CALL $name:ident, $a:expr, $b:expr, $c:expr, $d:expr) =>
-        (syscall4($name, $a, $b, $c, $d));
-    (@CALL $name:ident, $a:expr, $b:expr, $c:expr, $d:expr, $e:expr) =>
-        (syscall5($name, $a, $b, $c, $d, $e));
-    (@CALL $name:ident, $a:expr, $b:expr, $c:expr, $d:expr, $e:expr, $f:expr) =>
-        (syscall6($name, $a, $b, $c, $d, $e, $f));
-    ($name:ident ( $($args:expr),*) -> 0) => (
-        match syscall!(@CALL $name $(, $args as isize)*) {
-            0  => Ok(()),
-            n if n > 0 => unreachable!(),
-            e => Err(-e as Errno)
-        }
-    );
-    ($name:ident ( $($args:expr),*) -> $t:ty) => (
-        match syscall!(@CALL $name $(, $args as isize)*) {
-            n if n >= 0 => Ok(n as $t),
-            e => Err(-e as Errno)
-        }
-    );
-}
+pub type Errno = i64;
 
 pub unsafe fn close(fd: RawFd) -> Result<(), Errno> {
-    syscall!(SYS_close(fd) -> 0)
+    syscall!(SYS_close, fd).map(|_| ())
 }
 
 pub mod epoll {
@@ -66,13 +36,13 @@ pub mod epoll {
         Del = libc::EPOLL_CTL_DEL as isize
     }
     pub unsafe fn epoll_create() -> Result<RawFd, Errno> {
-        syscall!(SYS_epoll_create1(0) -> RawFd)
+        syscall!(SYS_epoll_create1, 0).map(|n| n as _)
     }
     pub unsafe fn epoll_ctl(epoll_fd: RawFd, op: CtlOp, fd: RawFd, event: Option<&Event>) -> Result<(), Errno> {
-        syscall!(SYS_epoll_ctl(epoll_fd, op, fd, event.map(|r| r as *const Event as isize).unwrap_or(0)) -> 0)
+        syscall!(SYS_epoll_ctl, epoll_fd, op, fd, event.map(|r| r as *const Event as isize).unwrap_or(0)).map(|_| ())
     }
     pub unsafe fn epoll_wait(fd: RawFd, set: *mut Event, num_events: usize, timeout: i32) -> Result<usize, Errno> {
-        syscall!(SYS_epoll_wait(fd, set, num_events, timeout) -> usize)
+        syscall!(SYS_epoll_wait, fd, set, num_events, timeout).map(|n| n as _)
     }
 }
 
@@ -92,7 +62,7 @@ pub mod msg {
     }
 
     pub unsafe fn recv(fd: RawFd, buf: &mut [u8], flags: Flags) -> Result<usize, Errno> {
-        syscall!(SYS_recvfrom(fd, buf.as_ptr(), buf.len(), flags.bits(), 0, 0) -> usize)
+        syscall!(SYS_recvfrom, fd, buf.as_ptr(), buf.len(), flags.bits(), 0, 0).map(|n| n as _)
     }
 }
 pub mod sock {
@@ -120,10 +90,10 @@ pub mod sock {
     }
         
     pub unsafe fn socket(domain: SockDomain, stype: SockType) -> Result<RawFd, Errno> {
-        syscall!(SYS_socket(domain, stype, 0) -> RawFd)
+        syscall!(SYS_socket, domain, stype, 0).map(|n| n as _)
     }
     pub unsafe fn listen(fd: RawFd, backlog: i32) -> Result<(), Errno> {
-        syscall!(SYS_listen(fd, backlog) -> 0)
+        syscall!(SYS_listen, fd, backlog).map(|_| ())
     }
     pub trait Addr {
         type Data;
@@ -168,12 +138,12 @@ pub mod sock {
     }
     pub unsafe fn bind<A: Addr>(fd: RawFd, addr: A) -> Result<(), Errno> {
         let data = addr.data();
-        syscall!(SYS_bind(fd, &data as *const A::Data, mem::size_of_val(&data)) -> 0)
+        syscall!(SYS_bind, fd, &data as *const A::Data, mem::size_of_val(&data)).map(|_| ())
     }
     pub unsafe fn accept<A: Addr>(fd: RawFd, flags: Flags) -> Result<(RawFd, A), Errno> {
         let mut addr: A::Data = mem::zeroed();
         let mut len: u32 = mem::size_of::<A::Data>() as u32;
-        let fd = syscall!(SYS_accept4(fd, &mut addr as *mut _, &mut len as *mut _, flags.bits()) -> RawFd)?;
-        Ok((fd, A::from_data(addr)))
+        let fd = syscall!(SYS_accept4, fd, &mut addr as *mut _, &mut len as *mut _, flags.bits())?;
+        Ok((fd as i32, A::from_data(addr)))
     }
 }

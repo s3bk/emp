@@ -1,8 +1,9 @@
 use std::os::unix::io::{RawFd, AsRawFd};
 use crate::sys::{epoll::Event, *};
 use std::ops::Deref;
-use crate::dispatch::{Dispatcher, PreparedCoro, Sleep, Cid, ProcessYield};
+use crate::dispatch::{Dispatcher, GenBox, Sleep, Cid, ProcessYield, ResumeArg};
 use crate::message::Envelope;
+use slotmap::KeyData;
 
 pub struct EPoll {
     fd: RawFd
@@ -79,8 +80,8 @@ pub fn register<F: AsRawFd>(f: F, event: epoll::Event) -> Registered<F> {
     Registered { inner: f }
 }
 
-pub fn sleeper() -> PreparedCoro {
-    Dispatcher::prepare_spawn(move |cid| move |_: Option<Envelope>| {
+pub fn sleeper() -> GenBox {
+    Box::pin(Box::new(move |_: ResumeArg| {
         let mut events = Vec::with_capacity(1024);
         loop {
             recv!{
@@ -89,7 +90,7 @@ pub fn sleeper() -> PreparedCoro {
                         Ok(()) => {
                             for i in 0 .. events.len() {
                                 let epoll::Event { events, data } = events[i];
-                                send!(Cid(data as u32), WakeUp(events));
+                                send!(Cid::from_ffi(data), WakeUp(events));
                             }
                             events.clear();
                         },
@@ -101,5 +102,5 @@ pub fn sleeper() -> PreparedCoro {
                 }
             }
         }
-    })
+    }))
 }

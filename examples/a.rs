@@ -34,7 +34,7 @@ fn main() {
             bar += n;
             println!("now {} bar", bar);
             
-            yield_to!(printer, format!("{} bars", bar))
+            send!(printer, format!("{} bars", bar))
         }
     });
     
